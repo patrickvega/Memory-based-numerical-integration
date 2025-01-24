@@ -84,8 +84,12 @@ class Neural_Network(torch.nn.Module):
         
         for layer in self.middle_layers:
             output = self.activation_function(layer(output))
+            
+        output = self.layer_out(output).squeeze(-1)
         
-        return self.layer_out(output).squeeze(-1)
+        return output * Input.squeeze(1) * (Input.squeeze(1) - 1)
+
+        # return output
                     
     def optimizer_step(self, 
                        loss_value: torch.Tensor):

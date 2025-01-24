@@ -3,7 +3,7 @@ import torch
 
 from Neural_Network import Neural_Network
 from datetime import datetime
-from numpy import pi, exp 
+from numpy import pi, exp, sqrt, linspace, meshgrid, log
 
 torch.set_default_device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
@@ -19,7 +19,7 @@ hidden_layers_dimension = 15
 
 ## ----------------------Training Parameters------------------##
 
-batch_size = 1000
+batch_size = 20
 epochs = 5000
 learning_rate = 10e-5
 optimizer = "Adam"  # Adam or SGD
@@ -32,6 +32,7 @@ NN = Neural_Network(input_dimension = 1,
                     learning_rate = learning_rate)
 
 integration_points = torch.linspace(0, 1, 1000, requires_grad = False).unsqueeze(-1)
+estimator_points = torch.linspace(0, 1, 20, requires_grad = False).unsqueeze(-1)
 
 integration_nodes, integration_weights = leggauss(3)
 integration_nodes = torch.tensor(integration_nodes).unsqueeze(1)
@@ -56,79 +57,128 @@ def integrate(function, integration_points):
     
     return torch.sum(integral_value)
 
-# rhs = lambda x: -20 * (torch.cos(20 * x) - x * torch.sin(20 * x))
+def integrate_pointwise(function, integration_points):
+
+ 
+    function_values = function(integration_points) 
+    
+    return function_values.squeeze()/function_values.size(0)
+
 rhs = lambda x: pi**2 * torch.sin(pi * x) 
 f = lambda x: (NN.laplacian(x) + rhs(x))**2
-# exact = lambda x: x * torch.sin(20 * x)
 exact = lambda x: torch.sin(pi*x)
 
-beta = lambda t: exp(-0.0005 * t)
+# beta = lambda t: exp(-0.0005 * t)
+
+beta = lambda t: 1 /(t + 1)**(1/2)
+
+# beta = lambda t: 1.
 
 M_previous = 0.
+M_cal_previous = 0.
+M_estimator_previous = 0.
 
-def compute_loss(t, M_previous):
+def compute_loss(t, M_previous, M_cal_previous, M_estimator_previous):
 
     # Compute Values for Loss
-    
+
+    loss_function = torch.nn.L1Loss(reduction = 'sum')
+
     x = torch.rand(batch_size)
     
-    loss_function = torch.nn.L1Loss(reduction = 'sum')
-        
-    F = torch.mean(f(x))
-    
-    bc = NN(torch.tensor([0., 1.]))**2
-        
-    loss = torch.concat([F.unsqueeze(-1), bc], axis = -1)     
-
-    loss_value = loss_function(loss,torch.zeros_like(loss,requires_grad = True))
+    if (t == 0):
+        M_previous = torch.mean(f(x))
+        M_cal_previous = integrate(f, integration_points)
+        M_estimator_previous = integrate_pointwise(f, estimator_points)
 
     # Compute Errors
     
-    # with torch.no_grad():
-            
-    F_cal = integrate(f, integration_points)
-    
+    F = torch.mean(f(x))                    
     M = beta(t) * F + (1 - beta(t)) * M_previous
+    
 
-    M_cal = integrate(lambda x : beta(t) * f(x) + (beta(t) - 1) * M_previous, integration_points)
-
+    F_cal = integrate(f, integration_points)
+    M_cal = beta(t) * F_cal + (1 - beta(t)) * M_cal_previous
+    
+    F_estimator = integrate_pointwise(f, estimator_points)
+    M_estimator = beta(t) * F_estimator + (1 - beta(t)) * M_estimator_previous
+    
+    memory_estimator = torch.sum(torch.abs(F_estimator - M_estimator))
+    
     total_error = abs(F_cal.item() - M.item())
     memory_error = abs(F_cal.item() - M_cal.item())
     integration_error = abs(M_cal.item() - M.item())
-
-    return loss_value, M, F, F_cal, total_error, memory_error, integration_error
     
-    return loss_value
+    loss_value = loss_function(F, torch.zeros_like(F,requires_grad = True))
+
+    # loss_value = loss_function(M, torch.zeros_like(M, requires_grad = True))
+
+    return loss_value, M, F_cal, M_cal, M_estimator, total_error, memory_error, integration_error , memory_estimator
+    
+
+# def compute_convergence_term(epochs, memory_estim)
+
+betas = torch.linspace(0, 1, 100).unsqueeze(-1)
+
+
+def plot_estimator(epoch, M_estimator_previous):
+
+    
+    F_estimator = integrate_pointwise(f, estimator_points).unsqueeze(-1)
+    
+    M_estimators = betas * F_estimator.T + (1 - betas) * M_estimator_previous.unsqueeze(-1).T
+    
+    memory_estimators = torch.sum(torch.abs(F_estimator.T - M_estimators), dim = 1)
+
+    return memory_estimators
 
 loss_list = []
 M_list = []
-F_list = []
 F_cal_list = []
+
 total_error_list = []
-memory_error_list = []
-integration_error_list = []
 sum_error_list = []
 
+memory_error_list = []
+integration_error_list = []
+memory_estimator_list = []
+
+alpha_list = [0, 0]
 
 start_time = datetime.now()
+
+plot_estimator_data = torch.zeros((epochs, 100))
 
 print(f"{'='*30} Training {'='*30}")
 for epoch in range(epochs):
     current_time = datetime.now().strftime("%H:%M:%S")
     print(f"{'='*20} [{current_time}] Epoch:{epoch + 1}/{epochs} {'='*20}")
         
-    loss_value, M, F, F_cal, total_error, memory_error, integration_error,  = compute_loss(epoch, M_previous)
+    loss_value, M, F_cal, M_cal, M_estimator, total_error, memory_error, integration_error , memory_estimator = compute_loss(epoch, M_previous, M_cal_previous, M_estimator_previous)
     
     M_previous = M.item()
+    M_cal_previous = M_cal.item()
+    M_estimator_previous = M_estimator
+        
+    plot_estimator_data[epoch, :] = plot_estimator(epoch, M_estimator_previous) 
     
+    if epoch >= 2:    
+        alpha = log(memory_estimator.item()/memory_estimator_list[-1])/log(epoch/epoch - 1)
+        alpha_list.append(alpha)
+        
     loss_list.append(loss_value.item())
     M_list.append(M.item())
-    F_list.append(F.item())
     F_cal_list.append(F_cal.item())
+    
     total_error_list.append(total_error)
+    sum_error_list.append(memory_error + integration_error)
+    
     memory_error_list.append(memory_error)
     integration_error_list.append(integration_error)
-    sum_error_list.append(memory_error + integration_error)
+    memory_estimator_list.append(memory_estimator.item())
+    
+    
+    
     print(f"Loss: {loss_value.item():.8f}")
     
     NN.optimizer_step(loss_value)
@@ -149,79 +199,124 @@ NN_evaluation = NN_evaluation.cpu().detach().numpy()
 
 plot_points = plot_points.cpu().detach().numpy()
 
-figure_solution, axis_solution = plt.subplots()
+convergence = lambda x: 45 / sqrt(x + 1)
 
-axis_solution.plot(plot_points,
-                   exact_evaluation,
-                   alpha = 0.6,
-                   label = "exact")
+beta_values = convergence(linspace(0 , epochs - 1, epochs))
 
-axis_solution.plot(plot_points,
-                   NN_evaluation,
-                   linestyle = "-.",
-                   label = r"$u^{\theta}$")
+# figure_solution, axis_solution = plt.subplots(dpi = 500)
 
-axis_solution.legend()
+# axis_solution.plot(plot_points,
+#                     exact_evaluation,
+#                     label = r"$u^*$")
 
-axis_solution.set(title = "PINNs final solution", 
-                  xlabel = "x", 
-                  ylabel = "u(x)")
+# axis_solution.plot(plot_points,
+#                     NN_evaluation,
+#                     linestyle = ":",
+#                     label = r"$u_{NN}$")
 
-figure_loss, axis_loss = plt.subplots()
+# axis_solution.legend()
 
-axis_loss.semilogy(loss_list)
+# axis_solution.set(title = "PINNs final solution", 
+#                   xlabel = "x", 
+#                   ylabel = "u(x)")
 
-axis_loss.set(title = "Loss Evolution", 
-              xlabel = "# Epoch", 
-              ylabel = "loss value")
+# figure_memory, axis_loss = plt.subplots(dpi = 500)
 
-figure_memory, axis_memory = plt.subplots()
+# axis_loss.semilogy(loss_list,
+#                     linestyle = ":",
+#                     label = r"Loss $(F)$")
+
+# axis_loss.semilogy(M_list,
+#                     linestyle = "--",
+#                     label = r"Memory Loss $(M)$")
+
+# axis_loss.semilogy(F_cal_list,
+#                     linestyle = "-",
+#                     alpha = 0.8,
+#                     color = "black",
+#                     label = r"Exact Loss($\mathcal{F}$)")
+
+# axis_loss.legend()
+
+# axis_loss.set(title = "Loss evolution",
+#               xlabel = "# Epochs",
+#               ylabel = "Loss value")
+
+# figure_error, axis_error = plt.subplots(dpi = 500)
+
+# axis_error.semilogy(integration_error_list,
+#                     linestyle = ":",
+#                     alpha = 0.8,
+#                     label = r"Integration error $(|\mathcal{M} - M|)$")
+
+# axis_error.semilogy(memory_error_list,
+#                     linestyle = "--",
+#                     label = r"Memory error $(|\mathcal{F} - \mathcal{M}|)$")
+
+# axis_error.semilogy(memory_estimator_list,
+#                     linestyle = "-.",
+#                     label = r"Estimator $(|\bar{F} - \bar{M}|)$")
+
+# # axis_error.semilogy(beta_values,
+# #                     linestyle = "-",
+# #                     alpha = 0.6,
+# #                     color = "black",
+# #                     label = r"$\frac{1}{\sqrt{x}}$")
+
+# axis_error.semilogy(alpha_list,
+#                     linestyle = ":",
+#                     label = r"$\alpha$")
+
+# axis_error.set(title = "Error Comparation",
+#                 xlabel = "# Epochs",
+#                 ylabel = "Error value")
+
+# axis_error.legend()
 
 
-axis_memory.semilogy(F_list,
-                     linestyle = "-.",
-                     label = r"$F$")
+from mpl_toolkits.mplot3d import Axes3D
 
-axis_memory.semilogy(M_list,
-                     linestyle = ":",
-                     label = r"$M$")
+# Crear la figura y el eje 3D
+fig = plt.figure(figsize=(10,8))
+ax = fig.add_subplot(111, projection='3d')
 
-axis_memory.semilogy(F_cal_list,
-                      linestyle = "-",
-                      alpha = 0.6,
-                      color = "black",
-                      label = r"$\mathcal{F}$")
+epochs_range = torch.arange(epochs)  # rango de epochs
+betas_np = betas.squeeze().cpu().detach().numpy() # convertir a numpy
+epochs_np = epochs_range.cpu().detach().numpy()    # convertir a numpy
 
-axis_memory.legend()
+B, E = meshgrid(betas_np, epochs_np)
 
-figure_total, axis_total = plt.subplots()
+plot_estimator_data_np = plot_estimator_data.cpu().detach().numpy()
 
-axis_total.semilogy(total_error_list,
-                    linestyle = ":",
-                    label = r"$|\mathcal{F} - M|$")
+surf = ax.plot_surface(
+    B, E, plot_estimator_data_np,
+    cmap='viridis', edgecolor='k', alpha=0.8
+)
 
-axis_total.semilogy(sum_error_list,
-                    linestyle = ":",
-                    label = r"$|\mathcal{F} - M| + |\mathcal{M} - M|$")
+# Cambiar el ángulo de vista
+# ax.view_init(azim=10)  # elev es el ángulo vertical, azim es la rotación horizontal
 
-axis_total.legend()
-
-figure_error, axis_error = plt.subplots()
-
-axis_error.semilogy(memory_error_list,
-                    linestyle = ":",
-                    label = r"$|\mathcal{F} - M|$")
-
-axis_error.semilogy(integration_error_list,
-                    linestyle = "-.",
-                    label = r"$|\mathcal{M} - M|$")
-
-axis_error.legend()
-
-# figure_loglog, axis_loglog = plt.subplots()
-
-# axis_loglog.loglog(F_list,M_list)
-
+# Etiquetas y título
+ax.set_xlabel(r"$\beta$", fontsize=12)
+ax.set_ylabel("# Epochs", fontsize=12)
+ax.set_zlabel(r"Estimator $(|(\bar{F} - \bar{M})(\beta)|)$", fontsize=12)
+  
 plt.show()
 
-  
+# figure_total, axis_total = plt.subplots(dpi = 500)
+
+# axis_total.semilogy(total_error_list,
+#                     linestyle = ":",
+#                     alpha = 0.6,
+#                     label = r"Total error $(|\mathcal{F} - M|)$")
+
+# axis_total.semilogy(sum_error_list,
+#                     linestyle = "--",
+#                     label = r"$|\mathcal{F} - \mathcal{M}| + |\mathcal{M} - M|$")
+
+# axis_total.legend()
+
+# axis_total.set(title = "Error Comparation",
+#                xlabel = "# Epochs",
+#                ylabel = "Error value")
+
